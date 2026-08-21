@@ -24,6 +24,7 @@ class ItemType(str, Enum):
     CERTIFICATION = "CERTIFICATION"
     SKILL = "SKILL"
     ACHIEVEMENT = "ACHIEVEMENT"
+    CONTACT = "CONTACT"
 
 class ProfileItem(BaseModel):
     id: str
@@ -270,7 +271,7 @@ def parse_profile_data(
 
 # Example Usage:
 if __name__ == "__main__":
-    instruction = f"github link is https://github.com/georgebassem111"
+    instruction = f"github link is https://github.com/georgebassem111, and read the cv file in this path D:\ProfileFit\data\George_Bassem_Backend_AI_Engineer_CV.pdf, and extract the profile data from it."
     extracted_items = parse_profile_data(instruction)
     for item in extracted_items:
         print(item.model_dump_json(indent=2))
