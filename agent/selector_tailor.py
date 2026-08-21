@@ -31,7 +31,7 @@ class JobRequirements(BaseModel):
     minimum_years_experience: int
 
 
-def retrieve_job_requirements(top_k: int = 4) -> JobRequirements:
+def retrieve_job_requirements(top_k: int = 10) -> JobRequirements:
     """Retrieve the most relevant saved job posting and structure its requirements."""
     rag_result = json.loads(
         rag_search(
@@ -90,12 +90,17 @@ class TailoredCV(BaseModel):
         description="Important skills from the job description not found in the selected profile."
     )
 
+    cv : str = Field(
+        description="The final CV content in a professional format, one-two pages, This is a human-readable version of the CV."
+    )
+
+
 # --- 3. The Selector & Tailor Agent ---
 def generate_tailored_cv(
     job_reqs: JobRequirements,
     candidate_items: Optional[list[ProfileItem]] = None,
     rag_sources: Optional[list[dict]] = None,
-    top_k: int = 6,
+    top_k: int = 10,
 ) -> TailoredCV:
     """Select and tailor profile items, grounding selection in the RAG corpus.
 
@@ -137,7 +142,10 @@ def generate_tailored_cv(
 
     # System prompt explicitly enforcing the three steps from the diagram
     sys_prompt = """
-    You are an expert CV Selector & Tailor Agent.
+    You are an expert CV Builder & Tailor Agent.
+    
+    make the cv output in 400 words or more, do not fail.
+    make spaces and new lines between each section of the cv, do not fail.
 
     Your tasks are:
     1. Rerank candidates: Evaluate all provided 'Candidate Profile Items' against the 'Job Requirements' and assign a relevance score.
@@ -149,6 +157,14 @@ def generate_tailored_cv(
     5. Include every provided candidate ID in omitted_experience_ids when it is not
        selected. For RAG chunks without an explicit ID, use a stable source label
        such as the source rank (for example, "rag_source_1").
+
+    6. Do not hallucinate any information. If a required skill is missing from the candidate context, list it in missing_skills.
+
+    7. Make the output in CV format, selected experiences, omitted experience IDs, DO NOT PUT missing skills. Use the TailoredCV schema for output.
+
+    8. one-two page CV constraint: Ensure the selected experiences and their tailored bullets fit within a one-page CV format. If necessary, prioritize the most relevant experiences and omit less relevant ones to meet this constraint.
+    9. Output the final result in JSON format, strictly adhering to the TailoredCV schema. Do not include any additional text or commentary outside of the JSON structure.
+    10. If you cannot find any relevant experiences or skills in the candidate context, return an empty list for selected_experiences and include all missing skills in the missing_skills field.
     """
 
     prompt = (
@@ -182,7 +198,7 @@ if __name__ == "__main__":
             f"{', '.join(job_reqs.required_skills)}. Preferred skills: "
             f"{', '.join(job_reqs.preferred_skills)}."
         )
-        rag_result = json.loads(rag_search(rag_query, top_k=6))
+        rag_result = json.loads(rag_search(rag_query, top_k=10))
         rag_sources = rag_result.get("sources", [])
         print(f"Retrieved {len(rag_sources)} candidate context chunks from RAG.\n")
 
@@ -190,7 +206,8 @@ if __name__ == "__main__":
             job_reqs,
             rag_sources=rag_sources,
         )
-        
+
+
         print("=== PROFESSIONAL SUMMARY ===")
         print(tailored_cv.professional_summary, "\n")
         
@@ -210,5 +227,9 @@ if __name__ == "__main__":
         print("=== MISSING SKILLS ===")
         print(", ".join(tailored_cv.missing_skills))
         
+        print("\n=== FINAL CV CONTENT ===")
+        print(tailored_cv.cv)
+
+
     except Exception as e:
         print(f"Error: {e}")
