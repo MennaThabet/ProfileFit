@@ -8,6 +8,8 @@ from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 from google import genai
 from google.genai import types
+from dotenv import load_dotenv
+load_dotenv()
 
 # 1. Define the Schema ->>>> will be moved to schema file later
 class ItemType(str, Enum):
