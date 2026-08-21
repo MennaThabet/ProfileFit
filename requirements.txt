@@ -1,1 +1,49 @@
+# Core LLM / Agent orchestration
+langgraph>=0.2.0
+langchain-core>=0.3.0
+langchain-groq>=0.2.0          
+groq>=0.11.0                   # direct SDK, for TOON cost benchmarking calls
 
+# Structured outputs / validation
+pydantic>=2.8.0
+pydantic-settings>=2.4.0       # clean .env -> config loading
+
+# Retrieval (S2) 
+llama-index>=0.11.0
+llama-index-embeddings-huggingface>=0.3.0   # or llama-index-embeddings-openai
+llama-index-llms-groq>=0.2.0                # or llama-index-llms-openai
+llama-index-retrievers-bm25>=0.3.0          # hybrid retrieval (sparse leg)
+sentence-transformers>=3.0.0                # for local embeddings if not using API
+
+# API backend (S5) 
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9        # for file uploads via FastAPI
+
+# Interface (S4) 
+streamlit>=1.38.0
+requests>=2.32.0                # Streamlit -> FastAPI calls
+
+# Config / environment 
+python-dotenv>=1.0.1
+
+# Document/profile parsing 
+pypdf>=4.3.0                    # if master profiles include PDFs
+python-docx>=1.1.2              # if master profiles include Word docs
+markdown-it-py>=3.0.0
+
+# Evaluation 
+scikit-learn>=1.5.0              # precision/recall@k calcs
+pandas>=2.2.0                    # eval set handling, reports
+
+# Cost / Observability + TOON 
+tiktoken>=0.7.0                  # token counting for cost profiling
+# toon (if using a specific TOON encoding library — otherwise implement in src/)
+
+# Testing 
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+httpx>=0.27.0                    # for testing FastAPI endpoints async
+
+# Misc utilities 
+tenacity>=9.0.0                  # retry/backoff for repair loops and API calls
