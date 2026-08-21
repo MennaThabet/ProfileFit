@@ -2,85 +2,95 @@
 
 ## Projects
 
-### gpu_database
+### LLM Evaluation (llm_evaluation)
 
-Web scraping project to harvest data on NVIDIA GPUs into CSV files using Pandas. Processes and calculates metrics including FLOPS, memory bandwidth, power consumption, price, and visualizes graphs to sort/rank GPUs by performance-to-cost ratio.
+Framework for evaluating Large Language Models (LLMs) using perplexity-based and generation-based evaluations.
+
+Skills used: Python, Jupyter Notebook, uv
+
+Quantified results:
+- Exact Match (EM)
+- Pass@1
+- F1 Score
+
+### GPU Database & Performance Analysis (gpu_database)
+
+Data pipeline and web scraper built to collect comprehensive details on NVIDIA GPUs. Exports data to CSV and analyzes performance specs to compute and graph optimal price-to-performance rankings.
 
 Skills used: Python, Pandas, Web Scraping, Data Visualization
 
 Quantified results:
-- Calculates FLOPS, memory bandwidth, power draw, pricing metrics, and performance-per-dollar efficiency.
+- FLOPS
+- Memory Bandwidth
+- Power Usage
+- Price vs. Performance Ranking
 
-### llm_evaluation
+### Mini PyTorch (mini_pytorch)
 
-Evaluation framework for Large Language Models (LLMs) featuring perplexity-based evaluation and generation-based evaluation (Exact Match / EM metrics).
+Lightweight deep learning framework implementation featuring custom micrograd autograd engine and microGPT architecture (microgpt.py, train_micro_gpt.py).
 
-Skills used: Jupyter Notebook, LLM Evaluation, NLP
+Skills used: Python, PyTorch, Autograd, uv
 
-### reproduce_deepseek
+### DeepSeek Reproduction (reproduce_deepseek)
 
-Implementation aiming to reproduce DeepSeek model architectures and components.
+Implementation reproducing DeepSeek LLM components, featuring GRPO (Group Relative Policy Optimization) training scripts (train_grpo.py).
 
-Skills used: Python, Deep Learning, LLMs
+Skills used: Python, Deep Learning, RLHF
 
-### mini_pytorch
+### Cognitive (Cognitive)
 
-Minimalistic re-implementation of core PyTorch deep learning framework functionality.
+Python-based project focusing on cognitive AI tasks and architectures.
 
-Skills used: Python, PyTorch, Deep Learning
+Skills used: Python
 
-### Hackathon-Chatbot
+### Neural Network Project (NN_project)
 
-Conversational AI chatbot built during a hackathon event.
+Project focused on neural network implementation and experimentation.
 
-Skills used: Python, Conversational AI
+### Hackathon Chatbot (Hackathon-Chatbot)
 
-### Cognitive
+Chatbot system built during a hackathon.
 
-Machine learning / cognitive computing repository.
+Skills used: Python
 
-Skills used: Python, Machine Learning, Cognitive Computing
+### WhatsApp Clone / Integration (WhatsApp_George)
 
-### NN_project
-
-Neural Network implementation project.
-
-Skills used: Neural Networks, Deep Learning
-
-### WhatsApp_George
-
-Application project recreating/building WhatsApp features in C#.
+WhatsApp application/service project built in C#.
 
 Skills used: C#
 
-### Facebook
+### Data Science Project (ds_project)
 
-Application project implementing Facebook-like features in Java.
+General data science analysis and modelling project licensed under Apache-2.0.
+
+### Facebook Clone / API Integration (Facebook)
+
+Java-based project implementing Facebook features or integration.
 
 Skills used: Java
 
-### ds_project
+### Open Source Contributions & Practice Forks
 
-Data science exploration and modeling project.
-
-Skills used: Python, Data Science
-
-### python-practice
-
-Repository containing Python coding practice and algorithmic exercises. Forked from rajpurkar/python-practice.
-
-Skills used: Python, Algorithms
-
-### cpython
-
-Local fork of the official CPython repository.
+Forks including cpython (official python/cpython core repository) and python-practice for algorithmic problem-solving in Python.
 
 Skills used: Python, C
 
 ## Skills
 
-### Technologies & Languages
+### Technical Skills Summary
 
-Demonstrated technical expertise across programming languages and software domains.
+Extracted software engineering, data science, and machine learning skill set.
 
-Skills used: Python, Java, C#, Jupyter Notebook, Deep Learning, LLM Evaluation, PyTorch, Data Scraping & Analysis, Pandas, Neural Networks
+Skills used: Python, Java, C#, C, LLM Evaluation, Deep Learning, Data Pipelines, Web Scraping, Pandas, uv, Jupyter Notebook, Git, GitHub
+
+## Achievements
+
+### GitHub Profile Summary
+
+Profile statistics for George Bassem (georgebassem111).
+
+Quantified results:
+- 12 Repositories
+- 123 Stars
+- 6 Followers
+- 16 Following
