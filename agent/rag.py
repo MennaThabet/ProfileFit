@@ -30,8 +30,8 @@ DATA_DIR = BASE_DIR / "data"
 INDEX_DIR = DATA_DIR / "index"
 CONTEXTS_CACHE = DATA_DIR / "contexts.json"
 
-DEFAULT_CHUNK_SIZE = 1500  # tokens
-DEFAULT_CHUNK_OVERLAP = 150  # tokens
+DEFAULT_CHUNK_SIZE = 1000  # tokens
+DEFAULT_CHUNK_OVERLAP = 200  # tokens
 INDEXABLE_EXTS = {".txt", ".md", ".pdf"}
 
 _index_cache: VectorStoreIndex | None = None
@@ -143,19 +143,10 @@ def _load_environment() -> None:
 
 def _get_llm_and_embedding() -> tuple[GoogleGenAI, GoogleGenAIEmbedding]:
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "No API key found. Add GOOGLE_API_KEY (or GEMINI_API_KEY) to .env "
-            "and run again."
-        )
 
     model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
     embed_model_name = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
 
-    # Disable the SDK's automatic function calling. rag.py makes plain text
-    # generation calls; without this, the SDK logs "AFC is enabled with max
-    # remote calls: 10" on every call, which looks like a hard cap on the
-    # context-generation loop but is actually a per-call no-op default.
     llm = GoogleGenAI(
         model=model,
         api_key=api_key,
@@ -217,20 +208,12 @@ def build_index(
         return load_index_from_storage(storage)
 
     files = _indexable_files(source)
-    if not files:
-        raise ValueError(
-            f"No indexable documents ({', '.join(sorted(INDEXABLE_EXTS))}) "
-            f"found in {source}. Populate it or set RAG_SOURCE_DIR."
-        )
 
     print(f"Reading {len(files)} document(s) from {source}...")
     reader = SimpleDirectoryReader(input_files=files)
     docs = reader.load_data()
 
-    splitter = SentenceSplitter(
-        chunk_size=args.chunk_size,
-        chunk_overlap=args.chunk_overlap,
-    )
+    splitter = SentenceSplitter(chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap)
     nodes = splitter.get_nodes_from_documents(docs)
     print(f"Split the documents into {len(nodes)} chunks.")
 
@@ -258,11 +241,7 @@ def get_index() -> VectorStoreIndex:
     source = resolve_source()
     signature = _source_signature(source)
 
-    if (
-        _index_cache is not None
-        and _index_cache_source == source
-        and _index_cache_signature == signature
-    ):
+    if (_index_cache is not None and _index_cache_source == source and _index_cache_signature == signature):
         return _index_cache
 
     llm, embed_model = _get_llm_and_embedding()
@@ -275,32 +254,13 @@ def get_index() -> VectorStoreIndex:
         chunk_overlap=DEFAULT_CHUNK_OVERLAP,
         no_context=True,  # fast tool-side builds; skip LLM chunk context
     )
-    _index_cache = build_index(
-        args, llm, embed_model, source, expected_signature=signature
-    )
+    _index_cache = build_index(args, llm, embed_model, source, expected_signature=signature)
     _index_cache_source = source
     _index_cache_signature = signature
     return _index_cache
 
 
 def rag_search(query: str, top_k: int = 4) -> str:
-    """Search the RAG knowledge base and return the most relevant chunks.
-
-    Use this tool whenever grounding your work in previously stored documents
-    (job postings, master profiles, reference material) would help. Ask a
-    natural-language question or supply keywords and get back the matching
-    document chunks with similarity scores. If the knowledge base is empty or
-    the search has no matches, the result explains that so you can proceed
-    without it.
-
-    Args:
-        query: Natural-language question or keywords describing what to find.
-        top_k: Number of most relevant chunks to return (default 4, max 10).
-
-    Returns:
-        A JSON string with a "sources" list of {"rank", "score", "text",
-        "metadata"} objects, or a "message" when nothing is available.
-    """
     print(f"RAG search for query: {query} (top_k={top_k})")
 
     try:
@@ -347,7 +307,7 @@ def answer_question(index: VectorStoreIndex, question: str, top_k: int) -> None:
 
     print(f"\nQuestion: {question}\n")
     print("Answer:")
-    print(clean_output(str(response)))
+    print(response)
 
     print("\nSources:")
     for i, node_with_score in enumerate(nodes, start=1):
@@ -357,7 +317,7 @@ def answer_question(index: VectorStoreIndex, question: str, top_k: int) -> None:
         if len(snippet) > 300:
             snippet = snippet[:300] + "..."
         score_str = f"{score:.3f}" if score is not None else "n/a"
-        print(f"  [{i}] score={score_str} | {clean_output(snippet)}")
+        print(f"  [{i}] score={score_str} | {snippet}")
 
 
 def main() -> None:
