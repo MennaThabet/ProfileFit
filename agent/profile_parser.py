@@ -4,39 +4,18 @@ import hashlib
 import json
 import re
 import requests
-from enum import Enum
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
-from pydantic import BaseModel, Field
 from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 from google import genai
 from google.genai import types
 
 from rag import KNOWLEDGE_BASE_DIR, rag_search
+from schemas import ItemType, ProfileItem, ProfileExtraction
 
-# 1. Define the Schema ->>>> will be moved to schema file later
-class ItemType(str, Enum):
-    EXPERIENCE = "EXPERIENCE"
-    EDUCATION = "EDUCATION"
-    PROJECT = "PROJECT"
-    CERTIFICATION = "CERTIFICATION"
-    SKILL = "SKILL"
-    ACHIEVEMENT = "ACHIEVEMENT"
-    CONTACT = "CONTACT"
-
-class ProfileItem(BaseModel):
-    id: str
-    type: ItemType
-    title: str
-    description: str
-    skills_used: list[str] = Field(default_factory=list)
-    dates: Optional[str] = None
-    quantified_results: list[str] = Field(default_factory=list)
-
-class ProfileExtraction(BaseModel):
-    items: list[ProfileItem]
+# NOTE: ItemType / ProfileItem / ProfileExtraction live in schemas.py.
 
 # TOOLS
 def extract_pdf_text(file_path: str) -> str:
@@ -70,8 +49,12 @@ def extract_url_text(url: str) -> str:
 
 SYS_PROMPT = """
 You are an expert profile parser. Read the extracted text from resumes, LinkedIn
-profiles, or GitHub pages. Extract all distinct roles, projects, and educational
+profiles, or GitHub pages. Extract all distinct roles, experiences, projects, and educational
 experiences into a structured list. Extract metrics for 'quantified_results' where possible.
+Also extract a single CONTACT item (type=CONTACT) containing the candidate's name, email,
+phone, location, and any professional links (LinkedIn, GitHub, portfolio) found in the
+source text, if present. This CONTACT item is stored in the master profile for the Exporter
+Agent to use later — it is never selected or rephrased by the Tailor Agent.
 When the instruction names a file path or URL, first call extract_pdf_text or
 extract_url_text to fetch the source text before structuring.
 You may call the rag_search tool whenever grounding your parsing in the project
@@ -167,7 +150,13 @@ def _profile_slug(items: list[ProfileItem], source_hint: str | None) -> str:
 
 
 def _render_profile_markdown(items: list[ProfileItem]) -> str:
-    """Render parsed profile items as readable Markdown for the RAG index."""
+    """Render parsed profile items as readable Markdown for the RAG index.
+
+    Every item is rendered with an explicit ``[ID: {item.id}]`` tag. This is
+    load-bearing: it's how downstream nodes (selector_tailor, coverage_critic,
+    fabrication_critic) recover a real ProfileItem.id from a retrieved RAG
+    chunk instead of inventing a rank-based placeholder label.
+    """
     sections = {
         ItemType.EXPERIENCE: "Experience",
         ItemType.EDUCATION: "Education",
@@ -177,6 +166,18 @@ def _render_profile_markdown(items: list[ProfileItem]) -> str:
         ItemType.ACHIEVEMENT: "Achievements",
     }
     lines = ["# Profile", ""]
+
+    contact_items = [item for item in items if item.type == ItemType.CONTACT]
+    if contact_items:
+        lines.append("## Contact")
+        lines.append("")
+        for item in contact_items:
+            lines.append(f"### {item.title} [ID: {item.id}]")
+            lines.append("")
+            if item.description:
+                lines.append(item.description)
+                lines.append("")
+
     for item_type, heading in sections.items():
         grouped = [item for item in items if item.type == item_type]
         if not grouped:
@@ -221,6 +222,15 @@ def save_profile(
     path.write_text(_render_profile_markdown(items), encoding="utf-8")
     print(f"Profile saved to {path}")
     return path
+
+
+def get_contact_items(items: list[ProfileItem]) -> list[ProfileItem]:
+    """Return only the CONTACT items from a parsed profile.
+
+    Convenience for the Exporter Agent, which needs contact info directly
+    from the master profile rather than from anything the Tailor Agent
+    """
+    return [item for item in items if item.type == ItemType.CONTACT]
 
 
 def parse_profile_data(

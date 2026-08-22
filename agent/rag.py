@@ -18,7 +18,11 @@ from llama_index.core import (
     load_index_from_storage,
 )
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.retrievers import (
+    VectorIndexRetriever,
+    QueryFusionRetriever,
+)
+from llama_index.retrievers.bm25 import BM25Retriever
 from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 from llama_index.llms.google_genai import GoogleGenAI
 
@@ -33,6 +37,11 @@ CONTEXTS_CACHE = DATA_DIR / "contexts.json"
 DEFAULT_CHUNK_SIZE = 1000  # tokens
 DEFAULT_CHUNK_OVERLAP = 200  # tokens
 INDEXABLE_EXTS = {".txt", ".md", ".pdf"}
+
+# Hybrid retrieval tuning: how many candidates each leg (dense, BM25) pulls
+# before fusion trims down to the caller's requested top_k. Over-fetching a
+# bit here gives the fusion step more to work with.
+HYBRID_FETCH_MULTIPLIER = 3
 
 _index_cache: VectorStoreIndex | None = None
 _index_cache_source: Path | None = None
@@ -260,13 +269,60 @@ def get_index() -> VectorStoreIndex:
     return _index_cache
 
 
-def rag_search(query: str, top_k: int = 4) -> str:
-    print(f"RAG search for query: {query} (top_k={top_k})")
+def _build_hybrid_retriever(index: VectorStoreIndex, top_k: int) -> QueryFusionRetriever:
+    """
+    Combine dense (vector) and sparse (BM25) retrieval via reciprocal rank fusion.
+
+    Dense retrieval catches semantic/paraphrased matches (e.g. "built ML
+    models" matching a query about "deep learning experience"). BM25 catches
+    exact keyword matches (e.g. "PyTorch", "Kubernetes") that dense embeddings
+    can under-rank when the surrounding phrasing differs. Fusing both and
+    re-ranking the combined pool gives better recall than either alone.
+    """
+    fetch_k = max(top_k * HYBRID_FETCH_MULTIPLIER, top_k)
+
+    vector_retriever = VectorIndexRetriever(index=index, similarity_top_k=fetch_k)
+
+    # BM25 needs the raw nodes, pulled from the index's docstore.
+    all_nodes = list(index.docstore.docs.values())
+    bm25_retriever = BM25Retriever.from_defaults(
+        nodes=all_nodes,
+        similarity_top_k=fetch_k,
+    )
+
+    return QueryFusionRetriever(
+        [vector_retriever, bm25_retriever],
+        similarity_top_k=top_k,
+        num_queries=1,  # don't generate query variations; keep it deterministic
+        mode="reciprocal_rerank",
+        use_async=False,
+    )
+
+
+def rag_search(
+    query: str,
+    top_k: int = 10,
+    source_filter: str | None = None,
+) -> str:
+    """
+    Hybrid (dense + BM25) search over the knowledge base.
+
+    Args:
+        query: natural-language search query.
+        top_k: number of results to return after fusion.
+        source_filter: optional substring matched against each candidate's ``metadata.file_path``
+    """
+    print(
+        f"RAG search for query: {query} (top_k={top_k}, "
+        f"source_filter={source_filter!r})"
+    )
 
     try:
         top_k = max(1, min(int(top_k), 10))
         index = get_index()
-        retriever = VectorIndexRetriever(index=index, similarity_top_k=top_k)
+        retriever = _build_hybrid_retriever(
+            index, top_k=(top_k * HYBRID_FETCH_MULTIPLIER if source_filter else top_k)
+        )
         nodes = retriever.retrieve(query)
     except ValueError as e:
         return json.dumps({"sources": [], "message": str(e)}, ensure_ascii=False)
@@ -275,6 +331,15 @@ def rag_search(query: str, top_k: int = 4) -> str:
             {"sources": [], "message": f"RAG search failed: {e}"},
             ensure_ascii=False,
         )
+
+    if source_filter:
+        needle = source_filter.lower()
+        nodes = [
+            n
+            for n in nodes
+            if needle in str(n.node.metadata.get("file_path", "")).lower()
+        ]
+        nodes = nodes[:top_k]
 
     sources = []
     for rank, node_with_score in enumerate(nodes, start=1):
@@ -292,15 +357,29 @@ def rag_search(query: str, top_k: int = 4) -> str:
         )
 
     if not sources:
-        return json.dumps(
-            {"sources": [], "message": "No relevant chunks found for that query."},
-            ensure_ascii=False,
-        )
+        message = "No relevant chunks found for that query."
+        if source_filter:
+            message += f" (scoped to source_filter={source_filter!r})"
+        return json.dumps({"sources": [], "message": message}, ensure_ascii=False)
     return json.dumps({"sources": sources}, ensure_ascii=False, default=str)
 
 
+def rag_search_posting(posting_identifier: str, query: str, top_k: int = 10) -> str:
+    """
+    Convenience wrapper for scoping a search to exactly one job posting.
+
+    ``posting_identifier`` should match (a substring of) the posting's saved
+    filename under ``data/knowledge_base/job_postings/`` — e.g. the slug
+    returned by ``requirement_extractor.save_posting`` or ``.md`` filename.
+    Use this instead of ``rag_search`` whenever a step should reason about a
+    single job posting (tailoring, coverage-critic checks, etc.) rather than
+    the entire indexed set of postings.
+    """
+    return rag_search(query, top_k=top_k, source_filter=posting_identifier)
+
+
 def answer_question(index: VectorStoreIndex, question: str, top_k: int) -> None:
-    retriever = VectorIndexRetriever(index=index, similarity_top_k=top_k)
+    retriever = _build_hybrid_retriever(index, top_k=top_k)
     synthesizer = get_response_synthesizer(response_mode="compact")
     nodes = retriever.retrieve(question)
     response = synthesizer.synthesize(question, nodes)
@@ -324,7 +403,7 @@ def main() -> None:
     _load_environment()
 
     parser = argparse.ArgumentParser(
-        description="Contextual RAG over the knowledge base using Google Gemini."
+        description="Contextual hybrid RAG (dense + BM25) over the knowledge base using Google Gemini."
     )
     parser.add_argument(
         "question",
