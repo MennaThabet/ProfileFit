@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -9,6 +7,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+import google.genai.types as genai_types
 
 from llama_index.core import (
     Settings,
@@ -24,13 +23,20 @@ from llama_index.embeddings.google_genai import GoogleGenAIEmbedding
 from llama_index.llms.google_genai import GoogleGenAI
 
 BASE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = BASE_DIR.parent
 ESSAY_PATH = BASE_DIR / "paul_graham_essay.txt"
+KNOWLEDGE_BASE_DIR = PROJECT_DIR / "data" / "knowledge_base"
 DATA_DIR = BASE_DIR / "data"
 INDEX_DIR = DATA_DIR / "index"
 CONTEXTS_CACHE = DATA_DIR / "contexts.json"
 
 DEFAULT_CHUNK_SIZE = 1500  # tokens
 DEFAULT_CHUNK_OVERLAP = 150  # tokens
+INDEXABLE_EXTS = {".txt", ".md", ".pdf"}
+
+_index_cache: VectorStoreIndex | None = None
+_index_cache_source: Path | None = None
+_index_cache_signature: str | None = None
 
 CONTEXT_PROMPT = """You are helping make chunks of a document easier to find in a search index.
 
@@ -62,7 +68,6 @@ else.
 
 
 def clean_output(text: str) -> str:
-    """Gemini 3.6 sometimes returns U+FFFD where an em dash belongs."""
     return text.replace("\ufffd", "\u2014")
 
 
@@ -83,6 +88,88 @@ def save_contexts(contexts: dict[str, str]) -> None:
     )
 
 
+def _indexable_files(source: Path) -> list[Path]:
+    """Return the files in ``source`` that the indexer can read."""
+    if source.is_file():
+        return [source] if source.suffix.lower() in INDEXABLE_EXTS else []
+    if source.is_dir():
+        return sorted(
+            p
+            for p in source.rglob("*")
+            if p.is_file()
+            and p.suffix.lower() in INDEXABLE_EXTS
+            and not p.name.startswith(".")
+        )
+    return []
+
+
+def resolve_source() -> Path:
+    """Pick the corpus to index.
+
+    Order: the ``RAG_SOURCE_DIR`` env var if set, then the project knowledge
+    base (``data/knowledge_base``) once it contains documents, then the
+    bundled Paul Graham essay as a demo fallback.
+    """
+    env_source = os.getenv("RAG_SOURCE_DIR")
+    if env_source:
+        return Path(env_source)
+    if _indexable_files(KNOWLEDGE_BASE_DIR):
+        return KNOWLEDGE_BASE_DIR
+    return ESSAY_PATH
+
+
+def index_dir_for(source: Path) -> Path:
+    """Persist each corpus's index in its own directory to avoid cache collisions."""
+    if source == ESSAY_PATH:
+        return INDEX_DIR  # keep the legacy essay cache
+    key = str(source.resolve()).lower()
+    return DATA_DIR / f"index_{hashlib.sha256(key.encode()).hexdigest()[:8]}"
+
+
+def _source_signature(source: Path) -> str:
+    """Fingerprint the corpus (paths, sizes, mtimes) to detect document changes."""
+    files = _indexable_files(source)
+    payload = "\n".join(
+        f"{p.resolve()}::{p.stat().st_size}::{p.stat().st_mtime_ns}" for p in files
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _load_environment() -> None:
+    """Load .env from the agent folder and the project root (whichever exists)."""
+    load_dotenv(BASE_DIR / ".env")
+    load_dotenv(PROJECT_DIR / ".env")
+
+
+def _get_llm_and_embedding() -> tuple[GoogleGenAI, GoogleGenAIEmbedding]:
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "No API key found. Add GOOGLE_API_KEY (or GEMINI_API_KEY) to .env "
+            "and run again."
+        )
+
+    model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    embed_model_name = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+
+    # Disable the SDK's automatic function calling. rag.py makes plain text
+    # generation calls; without this, the SDK logs "AFC is enabled with max
+    # remote calls: 10" on every call, which looks like a hard cap on the
+    # context-generation loop but is actually a per-call no-op default.
+    llm = GoogleGenAI(
+        model=model,
+        api_key=api_key,
+        generation_config=genai_types.GenerateContentConfig(
+            automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                disable=True,
+                maximum_remote_calls=None,
+            )
+        ),
+    )
+    embed_model = GoogleGenAIEmbedding(model_name=embed_model_name, api_key=api_key)
+    return llm, embed_model
+
+
 def add_context_to_nodes(nodes: list, llm: GoogleGenAI) -> list:
     """Prefix every node with an LLM-written context paragraph."""
     contexts = load_contexts()
@@ -91,7 +178,7 @@ def add_context_to_nodes(nodes: list, llm: GoogleGenAI) -> list:
         key = chunk_hash(node.text)
         if key not in contexts:
             prompt = CONTEXT_PROMPT.format(
-                title="What I Worked On (essay by Paul Graham)",
+                title="Knowledge base document",
                 chunk_text=node.text,
                 previous_text=nodes[i - 2].text if i > 1 else "(start of document)",
                 next_text=nodes[i].text if i < total else "(end of document)",
@@ -107,17 +194,37 @@ def add_context_to_nodes(nodes: list, llm: GoogleGenAI) -> list:
     return nodes
 
 
-def build_index(args: argparse.Namespace, llm: GoogleGenAI, embed_model) -> VectorStoreIndex:
-    if args.build and INDEX_DIR.exists():
-        shutil.rmtree(INDEX_DIR)  # project-local cache; rebuilt from scratch below
+def build_index(
+    args: argparse.Namespace,
+    llm: GoogleGenAI,
+    embed_model,
+    source: Path,
+    expected_signature: str | None = None,
+) -> VectorStoreIndex:
+    target_index_dir = index_dir_for(source)
+    manifest = target_index_dir / "_source_signature.txt"
+    stale = (
+        expected_signature is not None
+        and manifest.exists()
+        and manifest.read_text(encoding="utf-8").strip() != expected_signature
+    )
+    if (args.build or stale) and target_index_dir.exists():
+        shutil.rmtree(target_index_dir)  # project-local cache; rebuilt below
 
-    if INDEX_DIR.exists():
+    if target_index_dir.exists():
         print("Loading cached index...")
-        storage = StorageContext.from_defaults(persist_dir=INDEX_DIR)
+        storage = StorageContext.from_defaults(persist_dir=target_index_dir)
         return load_index_from_storage(storage)
 
-    print(f"Reading {ESSAY_PATH.name}...")
-    reader = SimpleDirectoryReader(input_files=[ESSAY_PATH])
+    files = _indexable_files(source)
+    if not files:
+        raise ValueError(
+            f"No indexable documents ({', '.join(sorted(INDEXABLE_EXTS))}) "
+            f"found in {source}. Populate it or set RAG_SOURCE_DIR."
+        )
+
+    print(f"Reading {len(files)} document(s) from {source}...")
+    reader = SimpleDirectoryReader(input_files=files)
     docs = reader.load_data()
 
     splitter = SentenceSplitter(
@@ -125,7 +232,7 @@ def build_index(args: argparse.Namespace, llm: GoogleGenAI, embed_model) -> Vect
         chunk_overlap=args.chunk_overlap,
     )
     nodes = splitter.get_nodes_from_documents(docs)
-    print(f"Split the essay into {len(nodes)} chunks.")
+    print(f"Split the documents into {len(nodes)} chunks.")
 
     if not args.no_context:
         nodes = add_context_to_nodes(nodes, llm)
@@ -133,9 +240,103 @@ def build_index(args: argparse.Namespace, llm: GoogleGenAI, embed_model) -> Vect
         print("Skipping LLM context generation (--no-context).")
 
     index = VectorStoreIndex(nodes, embed_model=embed_model, show_progress=True)
-    index.storage_context.persist(persist_dir=INDEX_DIR)
-    print(f"Index saved to {INDEX_DIR}.")
+    index.storage_context.persist(persist_dir=target_index_dir)
+    manifest.write_text(expected_signature or "", encoding="utf-8")
+    print(f"Index saved to {target_index_dir}.")
     return index
+
+
+def get_index() -> VectorStoreIndex:
+    """Load (or lazily build) the RAG index for the configured source.
+
+    The cache is invalidated whenever the corpus changes (new, removed, or
+    modified documents), so freshly saved profiles are immediately queryable.
+    """
+    global _index_cache, _index_cache_source, _index_cache_signature
+
+    _load_environment()
+    source = resolve_source()
+    signature = _source_signature(source)
+
+    if (
+        _index_cache is not None
+        and _index_cache_source == source
+        and _index_cache_signature == signature
+    ):
+        return _index_cache
+
+    llm, embed_model = _get_llm_and_embedding()
+    Settings.llm = llm
+    Settings.embed_model = embed_model
+
+    args = argparse.Namespace(
+        build=False,
+        chunk_size=DEFAULT_CHUNK_SIZE,
+        chunk_overlap=DEFAULT_CHUNK_OVERLAP,
+        no_context=True,  # fast tool-side builds; skip LLM chunk context
+    )
+    _index_cache = build_index(
+        args, llm, embed_model, source, expected_signature=signature
+    )
+    _index_cache_source = source
+    _index_cache_signature = signature
+    return _index_cache
+
+
+def rag_search(query: str, top_k: int = 4) -> str:
+    """Search the RAG knowledge base and return the most relevant chunks.
+
+    Use this tool whenever grounding your work in previously stored documents
+    (job postings, master profiles, reference material) would help. Ask a
+    natural-language question or supply keywords and get back the matching
+    document chunks with similarity scores. If the knowledge base is empty or
+    the search has no matches, the result explains that so you can proceed
+    without it.
+
+    Args:
+        query: Natural-language question or keywords describing what to find.
+        top_k: Number of most relevant chunks to return (default 4, max 10).
+
+    Returns:
+        A JSON string with a "sources" list of {"rank", "score", "text",
+        "metadata"} objects, or a "message" when nothing is available.
+    """
+    print(f"RAG search for query: {query} (top_k={top_k})")
+
+    try:
+        top_k = max(1, min(int(top_k), 10))
+        index = get_index()
+        retriever = VectorIndexRetriever(index=index, similarity_top_k=top_k)
+        nodes = retriever.retrieve(query)
+    except ValueError as e:
+        return json.dumps({"sources": [], "message": str(e)}, ensure_ascii=False)
+    except Exception as e:  # noqa: BLE001 - the caller model should never crash
+        return json.dumps(
+            {"sources": [], "message": f"RAG search failed: {e}"},
+            ensure_ascii=False,
+        )
+
+    sources = []
+    for rank, node_with_score in enumerate(nodes, start=1):
+        node = node_with_score.node
+        score = getattr(node_with_score, "score", None)
+        sources.append(
+            {
+                "rank": rank,
+                "score": round(float(score), 4) if score is not None else None,
+                "text": clean_output(node.text),
+                "metadata": {
+                    k: v for k, v in node.metadata.items() if k != "context"
+                },
+            }
+        )
+
+    if not sources:
+        return json.dumps(
+            {"sources": [], "message": "No relevant chunks found for that query."},
+            ensure_ascii=False,
+        )
+    return json.dumps({"sources": sources}, ensure_ascii=False, default=str)
 
 
 def answer_question(index: VectorStoreIndex, question: str, top_k: int) -> None:
@@ -160,12 +361,16 @@ def answer_question(index: VectorStoreIndex, question: str, top_k: int) -> None:
 
 
 def main() -> None:
-    load_dotenv(BASE_DIR / ".env")
+    _load_environment()
 
     parser = argparse.ArgumentParser(
-        description="Contextual RAG over Paul Graham's essay using Google Gemini."
+        description="Contextual RAG over the knowledge base using Google Gemini."
     )
-    parser.add_argument("question", nargs="?", help="Question to ask about the essay")
+    parser.add_argument(
+        "question",
+        nargs="?",
+        help="Question to ask about the indexed documents",
+    )
     parser.add_argument(
         "--build",
         action="store_true",
@@ -196,30 +401,32 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if not api_key:
+    try:
+        llm, embed_model = _get_llm_and_embedding()
+    except ValueError as e:
         print(
-            "No API key found. Add GOOGLE_API_KEY (or GEMINI_API_KEY) to .env "
-            "and run again."
+            e
         )
         sys.exit(1)
-
-    model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-    embed_model_name = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
-
-    llm = GoogleGenAI(model=model, api_key=api_key)
-    embed_model = GoogleGenAIEmbedding(model_name=embed_model_name, api_key=api_key)
 
     Settings.llm = llm
     Settings.embed_model = embed_model
 
-    index = build_index(args, llm, embed_model)
+    source = resolve_source()
+    print(f"RAG source: {source}")
+    index = build_index(
+        args,
+        llm,
+        embed_model,
+        source,
+        expected_signature=_source_signature(source),
+    )
 
     if args.question:
         answer_question(index, args.question, args.top_k)
     else:
         print("\nIndex ready. Ask a question, e.g.:")
-        print('  uv run rag.py "What did Paul Graham work on before college?"')
+        print('  uv run agent/rag.py "What did Paul Graham work on before college?"')
 
 
 if __name__ == "__main__":
