@@ -72,6 +72,11 @@ class GraphState(BaseModel):
         "set by the same node that populates profile_items. Used only by the "
         "Exporter node at the very end.",
     )
+    rag_sources: list[dict] = Field(
+        default_factory=list,
+        description="Candidate evidence chunks retrieved from the master-profile "
+        "knowledge base when profile_items were not supplied directly.",
+    )
 
     #  Selector/Tailor node output (overwritten on each revision attempt) 
     tailored_cv: Optional[TailoredCV] = None
@@ -80,6 +85,11 @@ class GraphState(BaseModel):
         description="How many times Selector/Tailor has been asked to revise "
         "based on critic feedback THIS run. Incremented by the Decision node "
         "when it routes back for revision. Compared against MAX_REVISIONS.",
+    )
+    critic_cycle_count: int = Field(
+        default=0,
+        description="How many complete coverage + fabrication critic cycles "
+        "have run during this graph execution.",
     )
     revision_feedback: Optional[str] = Field(
         default=None,

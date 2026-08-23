@@ -158,6 +158,7 @@ def generate_tailored_cv(
     job_reqs: JobRequirements,
     candidate_items: Optional[list[ProfileItem]] = None,
     rag_sources: Optional[list[dict]] = None,
+    revision_feedback: Optional[str] = None,
     top_k: int = 10,
     max_retries: int = 3,
 ) -> TailoredCV:
@@ -242,6 +243,11 @@ def generate_tailored_cv(
         f"Items available per section (for the coverage requirement): "
         f"{json.dumps(available_by_section)}"
     )
+    if revision_feedback:
+        prompt += (
+            "\n\nFeedback from the previous critic pass. Correct these findings "
+            "without introducing unsupported claims:\n" + revision_feedback
+        )
 
     last_error: Optional[str] = None
     last_result: Optional[TailoredCV] = None
