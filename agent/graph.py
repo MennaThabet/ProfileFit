@@ -6,6 +6,7 @@ from pathlib import Path
 from langgraph.graph import END, START, StateGraph
 
 from coverage_critic import run_coverage_critic
+from decision import build_fallback_output, run_decision_agent
 from exporter import export_cv
 from fabrication_critic import run_fabrication_critic
 from graph_state import DecisionStatus, GraphState, MAX_REVISIONS
@@ -131,6 +132,10 @@ def fabrication_critic_node(state: GraphState) -> dict:
 
 
 def decision_node(state: GraphState) -> dict:
+    """
+    Routing logic here is deliberately plain, deterministic Python
+    — NOT an LLM call
+    """
     state = _as_state(state)
     if state.security_flagged:
         _log("Decision: REJECTED_FLAGGED_POSTING")
@@ -141,21 +146,31 @@ def decision_node(state: GraphState) -> dict:
     if coverage is None or fabrication is None:
         return {"decision": DecisionStatus.NEEDS_REVISION}
 
-    if coverage.status.value == "PASS" and fabrication.status.value == "PASS":
+    overall_pass = coverage.status.value == "PASS" and fabrication.status.value == "PASS"
+
+    try:
+        agent_output = run_decision_agent(
+            coverage,
+            fabrication,
+            overall_pass=overall_pass,
+            revision_count=state.revision_count,
+            max_revisions=MAX_REVISIONS,
+        )
+    except Exception as e:  # noqa: BLE001 - synthesis failing must not block routing
+        _log(f"Decision Agent synthesis failed ({e}); using deterministic fallback text")
+        agent_output = build_fallback_output(coverage, fabrication, overall_pass)
+
+    if overall_pass:
         _log(
             f"Decision: APPROVED after revision #{state.revision_count}, "
             f"critic cycle #{state.critic_cycle_count}"
         )
-        return {"decision": DecisionStatus.APPROVED, "revision_feedback": None}
+        return {
+            "decision": DecisionStatus.APPROVED,
+            "revision_feedback": None,
+            "decision_summary": agent_output.summary_for_human,
+        }
 
-    feedback = (
-        f"Coverage critic ({coverage.status.value}): {coverage.evidence}\n"
-        f"Suggested missing items: {coverage.suggested_missing_items}\n"
-        f"Missing experiences: {coverage.missing_experiences}\n"
-        f"Weak claims: {coverage.weak_or_unproven_claims}\n\n"
-        f"Fabrication critic ({fabrication.status.value}): {fabrication.evidence}\n"
-        f"Findings: {[finding.model_dump() for finding in fabrication.findings]}"
-    )
     next_revision = state.revision_count + 1
     decision = (
         DecisionStatus.REJECTED_MAX_REVISIONS
@@ -170,7 +185,8 @@ def decision_node(state: GraphState) -> dict:
     return {
         "decision": decision,
         "revision_count": next_revision,
-        "revision_feedback": feedback,
+        "revision_feedback": agent_output.prioritized_feedback,
+        "decision_summary": agent_output.summary_for_human,
     }
 
 
@@ -240,6 +256,7 @@ if __name__ == "__main__":
     final_state = graph.invoke(initial_state.model_dump())
     print("\n[ProfileFit] Run complete")
     print(f"  Decision: {final_state['decision'].value}")
+    print(f"  Summary: {final_state.get('decision_summary') or 'n/a'}")
     print(f"  Revisions: {final_state['revision_count']}/{MAX_REVISIONS}")
     print(f"  Critic cycles: {final_state['critic_cycle_count']}")
     print(f"  DOCX: {final_state.get('docx_path') or 'not exported'}")

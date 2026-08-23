@@ -24,8 +24,6 @@ from schemas import (
     TailoredSectionItem,
 )
 
-# NOTE: ProfileItem, JobRequirements, TailoredCV, TailoredSectionItem live in schemas.py.
-
 _ID_TAG_RE = re.compile(r"\[ID:\s*([A-Za-z0-9_\-]+)\]")
 
 
@@ -34,6 +32,11 @@ def job_requirements_from_extraction(extraction: JobPostingExtraction) -> JobReq
     Build the (simpler) JobRequirements shape used by the Selector/Tailor
     prompt directly from a JobPostingExtraction — the structured output of
     requirement_extractor.extract_requirements() for THIS run's posting.
+
+    A job posting is per-run input, not part of the persistent retrieval
+    corpus, so there is nothing to search for or retrieve from the KB — the
+    extraction is already in memory and is passed straight through, exactly
+    as it will be passed between LangGraph nodes via shared state later.
     """
     required_skills: list[str] = []
     preferred_skills: list[str] = []
@@ -75,6 +78,15 @@ def _extract_valid_ids(candidate_items: Optional[list[ProfileItem]], profile_con
     Collect every ProfileItem.id that is actually grounded in the supplied
     candidate context, so a tailored CV's original_id fields can be validated
     post-hoc instead of trusted blindly.
+
+    - When explicit ProfileItem objects were passed in, their `.id` fields
+      are authoritative.
+    - When context came from RAG chunks (raw markdown text), the only
+      trustworthy IDs are the literal ``[ID: ...]`` tags that
+      profile_parser._render_profile_markdown() embeds in each item's
+      heading — anything else the model produces (e.g. a made-up
+      "rag_source_1" label) is not a real ProfileItem.id and should not be
+      accepted as traceable.
     """
     if candidate_items:
         return {item.id for item in candidate_items}
@@ -83,9 +95,15 @@ def _extract_valid_ids(candidate_items: Optional[list[ProfileItem]], profile_con
 
 def _available_items_by_section(
     candidate_items: Optional[list[ProfileItem]],
-    rag_sources: Optional[list[dict]],
+    profile_context: str,
 ) -> dict[str, int]:
     """Count how many tailorable source items exist per section.
+
+    With explicit candidate_items this is exact. With RAG-chunk text it's
+    approximate (counts "### " headings under each "## <Section>" block from
+    profile_parser._render_profile_markdown's layout) — exact enforcement is
+    most reliable when candidate_items (structured ProfileItems) are passed
+    directly rather than relying on retrieved chunk text.
     """
     counts: dict[str, int] = {}
     if candidate_items:
@@ -94,36 +112,22 @@ def _available_items_by_section(
                 counts[item.type.value] = counts.get(item.type.value, 0) + 1
         return counts
 
-    if not rag_sources:
-        return counts
-
     heading_to_type = {
-        "Education": ItemType.EDUCATION,
         "Experience": ItemType.EXPERIENCE,
+        "Education": ItemType.EDUCATION,
         "Projects": ItemType.PROJECT,
         "Certifications": ItemType.CERTIFICATION,
         "Skills": ItemType.SKILL,
         "Achievements": ItemType.ACHIEVEMENT,
     }
-    seen_ids: set[str] = set()
-    for source in rag_sources:
-        text = source.get("text", "")
-        current_type: Optional[ItemType] = None
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("## "):
-                current_type = heading_to_type.get(stripped[3:].strip())
-                continue
-            if stripped.startswith("### ") and current_type is not None:
-                # De-dupe by [ID: ...] tag across overlapping/duplicate
-                # chunks so an item split across two retrieved chunks (or
-                # retrieved twice) isn't double-counted.
-                match = _ID_TAG_RE.search(stripped)
-                item_id = match.group(1) if match else stripped
-                if item_id in seen_ids:
-                    continue
-                seen_ids.add(item_id)
-                counts[current_type.value] = counts.get(current_type.value, 0) + 1
+    current_type: Optional[ItemType] = None
+    for line in profile_context.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            current_type = heading_to_type.get(stripped[3:].strip())
+            continue
+        if stripped.startswith("### ") and current_type is not None:
+            counts[current_type.value] = counts.get(current_type.value, 0) + 1
     return counts
 
 
@@ -153,14 +157,14 @@ def check_section_coverage(
     return violations
 
 
-# --- The Selector & Tailor Agent ---
+#  The Selector & Tailor Agent 
 def generate_tailored_cv(
     job_reqs: JobRequirements,
     candidate_items: Optional[list[ProfileItem]] = None,
     rag_sources: Optional[list[dict]] = None,
-    revision_feedback: Optional[str] = None,
     top_k: int = 10,
     max_retries: int = 3,
+    revision_feedback: Optional[str] = None,
 ) -> TailoredCV:
     """Select and tailor profile items into a fully structured TailoredCV.
 
@@ -173,10 +177,6 @@ def generate_tailored_cv(
          available items must have >= MIN_ITEMS_PER_SECTION selected.
     If either check fails, the specific violation is fed back to the model
     and it retries, up to max_retries attempts total.
-
-    CONTACT items are filtered out of candidate_items before this function
-    ever sees them (see filter_tailorable_items) — the Tailor Agent has no
-    path to select or emit contact information.
     """
     client = genai.Client()
 
@@ -217,9 +217,7 @@ def generate_tailored_cv(
         )
 
     valid_ids = _extract_valid_ids(candidate_items, profile_context)
-    available_by_section = _available_items_by_section(
-        candidate_items, None if candidate_items else sources
-    )
+    available_by_section = _available_items_by_section(candidate_items, profile_context)
 
     sys_prompt = f"""
     You are an expert CV Builder & Tailor Agent.
@@ -244,10 +242,14 @@ def generate_tailored_cv(
         f"Items available per section (for the coverage requirement): "
         f"{json.dumps(available_by_section)}"
     )
+
     if revision_feedback:
         prompt += (
-            "\n\nFeedback from the previous critic pass. Correct these findings "
-            "without introducing unsupported claims:\n" + revision_feedback
+            f"\n\nIMPORTANT — this CV was already reviewed once and REJECTED. "
+            f"The reviewers found the following problems with your previous "
+            f"attempt. Produce a NEW version that fixes every issue below — do "
+            f"not repeat the same selections or bullets that caused these "
+            f"findings:\n{revision_feedback}"
         )
 
     last_error: Optional[str] = None
@@ -290,7 +292,7 @@ def generate_tailored_cv(
 
         return tailored_cv
 
-    # Exhausted retries. Traceability failures are hard-rejected 
+    # Exhausted retries. Traceability failures are hard-rejected, coverage failures are advisory-only.
     if last_error and last_error.startswith("TRACEABILITY"):
         raise ValueError(
             f"Failed to produce a tailored CV with traceable original_ids after "
@@ -349,7 +351,7 @@ def main() -> None:
             posting_source, fetch_first=fetch_first, save=False
         )
         job_reqs = job_requirements_from_extraction(extraction)
-        print(f"Extracted job posting: {job_reqs.job_title}\n")
+        print(f"Extracted job posting (this run only): {job_reqs.job_title}\n")
 
         if extraction.flagged_for_review:
             print(f"[FLAGGED] {extraction.flag_reason}")
@@ -394,7 +396,7 @@ def main() -> None:
         print("=== MISSING SKILLS ===")
         print(", ".join(tailored_cv.missing_skills))
 
-        print("\n(Structured output only — run exporter.py to produce the formatted document.)")
+        print("\n(Structured output only — run cv_renderer.py to produce the formatted document.)")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

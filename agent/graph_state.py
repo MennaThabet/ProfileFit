@@ -93,9 +93,23 @@ class GraphState(BaseModel):
     )
     revision_feedback: Optional[str] = Field(
         default=None,
-        description="Combined, human-readable feedback from the last critic run "
-        "(coverage + fabrication findings), passed back into the next "
-        "generate_tailored_cv() call's prompt so the retry is informed, not blind.",
+        description="Prioritized, actionable feedback for the next Selector/Tailor "
+        "attempt. Populated by the Decision Agent's DecisionAgentOutput."
+        "prioritized_feedback (see decision_agent.run_decision_agent) — a "
+        "clarified, severity-ordered synthesis of the coverage + fabrication "
+        "critics' raw findings, not a raw concatenation of their fields. "
+        "None when the last decision was APPROVED (nothing to revise).",
+    )
+    decision_summary: Optional[str] = Field(
+        default=None,
+        description="Plain-English summary of the current decision outcome, "
+        "from the Decision Agent (decision_agent.DecisionAgentOutput."
+        "summary_for_human). This is EXPLANATORY ONLY — intended for whatever "
+        "human-in-the-loop review UI eventually reads this state (and for "
+        "logging/debugging). It has no effect on routing: the actual "
+        "APPROVED/NEEDS_REVISION/REJECTED_* decision is computed by "
+        "deterministic Python in graph.py's decision_node BEFORE the Decision "
+        "Agent is even called, and the agent's output can never change it.",
     )
 
     #  Critic node outputs (run in parallel, both populated before Decision runs) 

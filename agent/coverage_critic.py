@@ -1,3 +1,5 @@
+import re
+
 from pydantic import BaseModel, Field
 from enum import Enum
 from google import genai
@@ -35,6 +37,18 @@ class CoverageCriticResult(BaseModel):
         description="CV claims that do not clearly demonstrate a job requirement and need stronger evidence or wording."
     )
 
+_CONTACT_SECTION_RE = re.compile(
+    r"##\s*Contact\b.*?(?=\n##\s|\Z)", re.IGNORECASE | re.DOTALL
+)
+
+
+def _strip_contact_section(text: str) -> str:
+    """
+    Remove the "## Contact" markdown section from retrieved profile chunk text BEFORE it reaches the LLM.
+    Without this, the Coverage Critic can flag contact info as a "missing experience" in its findings
+      """
+    return _CONTACT_SECTION_RE.sub("", text)
+
 
 def run_coverage_critic(
     tailored_cv: TailoredCV,
@@ -42,12 +56,6 @@ def run_coverage_critic(
     source_items: list[ProfileItem] | None = None,
 ) -> CoverageCriticResult:
     """Check job coverage against the posting and available profile evidence.
-
-    Args:
-        tailored_cv: the structured CV to check (schemas.TailoredCV)
-        job_reqs: the SAME JobRequirements object used to generate this CV
-        source_items: optional explicit ProfileItem list to fall back on if
-            RAG retrieval finds no master-profile evidence
     """
     client = genai.Client()
 
@@ -64,6 +72,11 @@ def run_coverage_critic(
         )
     )
     profile_sources = profile_result.get("sources", [])
+    # Strip any Contact section out of every retrieved chunk's text before it's ever assembled into the prompt 
+    for source in profile_sources:
+        if "text" in source:
+            source["text"] = _strip_contact_section(source["text"])
+
     if profile_sources:
         profile_context = json.dumps(profile_sources, indent=2, ensure_ascii=False)
     elif source_items:
@@ -83,8 +96,8 @@ def run_coverage_critic(
     The Tailored CV is a structured JSON object with a "sections" list — each entry has a section type (EXPERIENCE, EDUCATION, PROJECT, CERTIFICATION, SKILL, ACHIEVEMENT), a title, and tailored bullets. There is no contact information anywhere in it, and there should not be — do not flag the absence of contact info as a coverage gap, that is intentional and out of scope for this CV.
 
     Check all of the following:
-    1. Job Requirements Gap: Identify any required or preferred skills, responsibilities, experiences, education, or certifications from the Job Posting that are missing from the Tailored CV's sections but present in the Master Profile.
-    2. Master Profile Gap: Scan the Master Profile for any relevant skills, experiences, or education that are absent from the Tailored CV's sections and present in the Job Posting. Explicitly explain which missing job requirement each omitted item could satisfy. Ignore any CONTACT-type entries in the Master Profile entirely — they are never eligible to appear in a tailored CV.
+    1. Job Requirements Gap: Identify any required or preferred skills, responsibilities, experiences, education, or certifications from the Job Posting that are missing from the Tailored CV's sections.
+    2. Master Profile Gap: Scan the Master Profile for any relevant skills, experiences, or education that are absent from the Tailored CV's sections. Explicitly explain which missing job requirement each omitted item could satisfy. Ignore any CONTACT-type entries in the Master Profile entirely — they are never eligible to appear in a tailored CV.
     3. Evaluation: Output FAIL if any important job requirement is missing from the Tailored CV *but* could have been fulfilled by omitted evidence (skills, experience, education) from the Master Profile. Output PASS only when the Tailored CV effectively covers the job requirements by utilizing all relevant evidence available in the Master Profile.
 
     You are ADVISORY ONLY. You do not rewrite or edit the CV — you only report findings. Your output is feedback that a separate revision step will use to ask the Tailor Agent to produce a new version.
