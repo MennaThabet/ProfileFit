@@ -235,6 +235,7 @@ def generate_tailored_cv(
     8. NEVER include contact information (name, email, phone, address, links) anywhere in the output. This schema has no field for it and none should be inferred or invented, even if it appears in the candidate context.
     9. professional_summary must be 2-4 sentences, tailored to the job, with no contact info.
     10. Output strictly as the TailoredCV schema (structured sections, no free-text CV field). No additional commentary.
+    11. When you revise the TailoredCV DO NOT mess with contact information and other personal information (name , email , phone)
     """
 
     prompt = (
