@@ -131,6 +131,15 @@ class GraphState(BaseModel):
     pdf_path: Optional[str] = None
 
     # Security / observability 
+    match_score: Optional[int] = Field(
+        default=None,
+        description="Mirrors coverage_result.match_score for quick access "
+        "without unwrapping coverage_result. Deterministic 0-100 score of "
+        "how well the tailored CV matches the job's required/preferred "
+        "skills (see coverage_critic.compute_match_score). UI-facing only — "
+        "never written into the exported CV document, and never used for "
+        "PASS/FAIL routing decisions (those stay on coverage_result.status).",
+    )
     security_flagged: bool = Field(
         default=False,
         description="Mirrors job_extraction.flagged_for_review once set, for "

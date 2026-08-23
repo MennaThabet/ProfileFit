@@ -1,5 +1,4 @@
 import re
-
 from pydantic import BaseModel, Field
 from enum import Enum
 from google import genai
@@ -36,18 +35,87 @@ class CoverageCriticResult(BaseModel):
         default_factory=list,
         description="CV claims that do not clearly demonstrate a job requirement and need stronger evidence or wording."
     )
+    match_score: int = Field(
+        default=100,
+        ge=0,
+        le=100,
+        description=(
+            "Deterministic 0-100 match score between the tailored CV and the job's "
+            "required/preferred skills, computed in Python (NOT by the LLM) from "
+            "TailoredCV.missing_skills vs job_reqs.required_skills/preferred_skills. "
+            "Required skills are weighted 2x preferred skills. This is a UI-facing "
+            "number for the candidate to see (e.g. 'this CV is a 78% match for this "
+            "role') — it is never written into the exported CV document itself, only "
+            "surfaced in Streamlit. Computed by compute_match_score() and set on the "
+            "result before it's returned from run_coverage_critic()."
+        ),
+    )
 
-_CONTACT_SECTION_RE = re.compile(
-    r"##\s*Contact\b.*?(?=\n##\s|\Z)", re.IGNORECASE | re.DOTALL
-)
+
+_WORD_RE = re.compile(r"[a-zA-Z0-9+#.]+")
 
 
-def _strip_contact_section(text: str) -> str:
+def _tokenize(text: str) -> set[str]:
+    """Lowercased, alnum-ish token set for fuzzy skill-label matching.
+
+    Exact string matching against TailoredCV.missing_skills 
     """
-    Remove the "## Contact" markdown section from retrieved profile chunk text BEFORE it reaches the LLM.
-    Without this, the Coverage Critic can flag contact info as a "missing experience" in its findings
-      """
-    return _CONTACT_SECTION_RE.sub("", text)
+    stopwords = {"and", "or", "the", "a", "an", "in", "of", "with", "to", "for"}
+    return {
+        w for w in _WORD_RE.findall(text.lower())
+        if len(w) > 1 and w not in stopwords
+    }
+
+
+def _is_covered(requirement_label: str, missing_skills: list[str]) -> bool:
+    """A requirement counts as covered unless it clearly overlaps with
+    something the Tailor Agent itself flagged as missing."""
+    req_tokens = _tokenize(requirement_label)
+    if not req_tokens:
+        return True
+    for missing in missing_skills:
+        missing_tokens = _tokenize(missing)
+        if not missing_tokens:
+            continue
+        overlap = req_tokens & missing_tokens
+        if len(overlap) >= 1 and (
+            len(overlap) / max(len(req_tokens), 1) >= 0.4
+            or len(overlap) / max(len(missing_tokens), 1) >= 0.4
+        ):
+            return False
+    return True
+
+
+def compute_match_score(job_reqs: JobRequirements, tailored_cv: TailoredCV) -> int:
+    """
+    Deterministic match score: what fraction of the job's required/preferred
+    skills are NOT present in tailored_cv.missing_skills.
+    Required skills count 2x preferred skills toward the total.
+    """
+    if not tailored_cv.sections:
+        return 0
+
+    required = job_reqs.required_skills
+    preferred = job_reqs.preferred_skills
+    if not required and not preferred:
+        return 100
+
+    missing_skills = tailored_cv.missing_skills
+
+    covered_weight = 0
+    total_weight = 0
+    for skill in required:
+        total_weight += 2
+        if _is_covered(skill, missing_skills):
+            covered_weight += 2
+    for skill in preferred:
+        total_weight += 1
+        if _is_covered(skill, missing_skills):
+            covered_weight += 1
+
+    if total_weight == 0:
+        return 100
+    return round(100 * covered_weight / total_weight)
 
 
 def run_coverage_critic(
@@ -62,7 +130,9 @@ def run_coverage_critic(
     cv_context = tailored_cv.model_dump_json(indent=2)
     job_context = job_reqs.model_dump_json(indent=2)
 
-    # Master profile is the only thing still retrieved via RAG 
+    # Master profile is the only thing still retrieved via RAG — the
+    # candidate's profile is the persistent corpus regardless of which
+    # posting this run is tailoring against.
     profile_result = json.loads(
         rag_search(
             "Master profile experiences, projects, education, skills, and achievements "
@@ -72,7 +142,8 @@ def run_coverage_critic(
         )
     )
     profile_sources = profile_result.get("sources", [])
-    # Strip any Contact section out of every retrieved chunk's text before it's ever assembled into the prompt 
+    # Strip any Contact section out of every retrieved chunk's text before
+    # it's ever assembled into the prompt 
     for source in profile_sources:
         if "text" in source:
             source["text"] = _strip_contact_section(source["text"])
@@ -100,7 +171,7 @@ def run_coverage_critic(
     2. Master Profile Gap: Scan the Master Profile for any relevant skills, experiences, or education that are absent from the Tailored CV's sections. Explicitly explain which missing job requirement each omitted item could satisfy. Ignore any CONTACT-type entries in the Master Profile entirely — they are never eligible to appear in a tailored CV.
     3. Evaluation: Output FAIL if any important job requirement is missing from the Tailored CV *but* could have been fulfilled by omitted evidence (skills, experience, education) from the Master Profile. Output PASS only when the Tailored CV effectively covers the job requirements by utilizing all relevant evidence available in the Master Profile.
 
-    You are ADVISORY ONLY. You do not rewrite or edit the CV — you only report findings. Your output is feedback that a separate revision step will use to ask the Tailor Agent to produce a new version.
+    You are ADVISORY ONLY. You do not rewrite or edit the CV — you only report findings. Your output is feedback that a separate revision step will use to ask the Tailor Agent to produce a new version. Do not set match_score yourself — leave it as the default; it is overwritten deterministically after your response.
     """
 
     prompt = (
@@ -119,7 +190,23 @@ def run_coverage_critic(
             temperature=0.0, 
         )
     )
-    return response.parsed
+    result: CoverageCriticResult = response.parsed
+    result.match_score = compute_match_score(job_reqs, tailored_cv)
+    return result
+
+
+_CONTACT_SECTION_RE = re.compile(
+    r"##\s*Contact\b.*?(?=\n##\s|\Z)", re.IGNORECASE | re.DOTALL
+)
+
+
+def _strip_contact_section(text: str) -> str:
+    """
+    Remove the "## Contact" markdown section (and everything under it, up to
+    the next "## " heading or end of text) from retrieved profile chunk text
+    BEFORE it reaches the LLM.
+    """
+    return _CONTACT_SECTION_RE.sub("", text)
 
 
 if __name__ == "__main__":
@@ -158,7 +245,6 @@ if __name__ == "__main__":
     print("\n--- Running ProfileFit Example ---")
 
     try:
-        # 1. Extract the job posting for THIS run only (no KB write, no re-lookup).
         extraction = extract_requirements(posting_source, fetch_first=fetch_first, save=False)
         if extraction.flagged_for_review:
             print(f"[FLAGGED] {extraction.flag_reason}")
@@ -169,7 +255,6 @@ if __name__ == "__main__":
         print(f"Required skills: {', '.join(job_reqs.required_skills)}")
         print(f"Preferred skills: {', '.join(job_reqs.preferred_skills)}\n")
 
-        # 2. Retrieve candidate profile evidence for this job (master profile only).
         profile_result = json.loads(
             rag_search(
                 f"Candidate profile experiences and projects relevant to "
@@ -184,16 +269,14 @@ if __name__ == "__main__":
             raise ValueError("No master profile found in the knowledge base.")
         print(f"Retrieved {len(profile_sources)} profile source(s).\n")
 
-        # 3. Build the structured tailored CV from the retrieved profile evidence.
         tailored_cv = generate_tailored_cv(job_reqs, rag_sources=profile_sources)
         print("--- Tailored CV (structured) ---")
         print(tailored_cv.model_dump_json(indent=2))
 
-        # 4. Check whether job-related experiences and claims are covered,
-        #    against the SAME job_reqs object used for tailoring.
         result = run_coverage_critic(tailored_cv, job_reqs)
         print("\n--- Coverage Critic ---")
         print(f"Status: {result.status.value}")
+        print(f"Match score: {result.match_score}/100")
         print(f"Evidence: {result.evidence}")
 
         if result.suggested_missing_items:

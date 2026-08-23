@@ -110,9 +110,13 @@ def coverage_critic_node(state: GraphState) -> dict:
         state.job_reqs,
         source_items=state.profile_items,
     )
-    _log(f"Coverage critic: {result.status.value} (cycle #{state.critic_cycle_count})")
+    _log(
+        f"Coverage critic: {result.status.value} | match_score={result.match_score}/100 "
+        f"(cycle #{state.critic_cycle_count})"
+    )
     return {
-        "coverage_result": result
+        "coverage_result": result,
+        "match_score": result.match_score,
     }
 
 
@@ -133,8 +137,8 @@ def fabrication_critic_node(state: GraphState) -> dict:
 
 def decision_node(state: GraphState) -> dict:
     """
-    Routing logic here is deliberately plain, deterministic Python
-    — NOT an LLM call
+    Routing logic here is deliberately plain, deterministic Python — NOT an
+    LLM call.
     """
     state = _as_state(state)
     if state.security_flagged:
@@ -246,7 +250,7 @@ if __name__ == "__main__":
     from graph_state import build_initial_state
 
     initial_state = build_initial_state(
-        posting_source="https://www.linkedin.com/jobs/view/4446392638/",
+        posting_source="https://www.linkedin.com/jobs/view/4373797902/",
         fetch_first=True,
         profile_instruction=(
             "github link is https://github.com/georgebassem111, and read the CV "
@@ -256,6 +260,16 @@ if __name__ == "__main__":
     final_state = graph.invoke(initial_state.model_dump())
     print("\n[ProfileFit] Run complete")
     print(f"  Decision: {final_state['decision'].value}")
+    print(f"  Match score: {final_state.get('match_score')}/100")
+    print(f"  Security flagged: {final_state.get('security_flagged')}")
+    if final_state.get('security_flagged'):
+        flag_reason = None
+        job_extraction = final_state.get('job_extraction')
+        if job_extraction is not None:
+            flag_reason = getattr(job_extraction, 'flag_reason', None) or (
+                job_extraction.get('flag_reason') if isinstance(job_extraction, dict) else None
+            )
+        print(f"  Flag reason: {flag_reason}")
     print(f"  Summary: {final_state.get('decision_summary') or 'n/a'}")
     print(f"  Revisions: {final_state['revision_count']}/{MAX_REVISIONS}")
     print(f"  Critic cycles: {final_state['critic_cycle_count']}")
