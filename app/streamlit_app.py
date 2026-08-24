@@ -1,14 +1,17 @@
-
 """
-ProfileFit UI — Streamlit frontend for the Master Profile -> Job-Tailored CV
-Generator.
+ProfileFit Streamlit UI.
 
-Talks to the FastAPI backend in api.py. Run the two together:
+Flow:
+    1. Parse master profile (GitHub link / instruction, or upload a CV PDF).
+    2. Submit a job posting (paste text, paste a URL, or upload a PDF).
+    3. Poll the background /tailor job until done, showing live progress.
+    4. Render the result: poisoned-posting alert, match score, missing
+       skills, section breakdown, decision summary, and download buttons
+       named "<candidate_name>_CV.docx/.pdf".
 
-    uvicorn api:app --reload --port 8000
-    streamlit run streamlit_app.py
-
-Set API_BASE_URL below (or via env var) if the API isn't on localhost:8000.
+Run with the FastAPI backend already running (default http://localhost:8000):
+    uvicorn api.FastAPI_app:app --reload
+    streamlit run app/streamlit_app.py
 """
 
 import os
@@ -19,216 +22,278 @@ import streamlit as st
 
 API_BASE_URL = os.getenv("PROFILEFIT_API_URL", "http://localhost:8000")
 POLL_INTERVAL_SECONDS = 2
-POLL_TIMEOUT_SECONDS = 300
+POLL_TIMEOUT_SECONDS = 180
 
-st.set_page_config(page_title="ProfileFit — CV Tailor", page_icon="🧭", layout="wide")
+st.set_page_config(page_title="ProfileFit", page_icon="📄", layout="wide")
+st.title("📄 ProfileFit — Job-Tailored CV Generator")
 
-
-# Helpers
-
-def poll_job(job_id: str, label: str) -> dict:
-    """Block (with a visible spinner) until a background job finishes."""
-    start = time.time()
-    with st.spinner(label):
-        while True:
-            resp = requests.get(f"{API_BASE_URL}/api/jobs/{job_id}", timeout=30)
-            resp.raise_for_status()
-            job = resp.json()
-            if job["status"] == "done":
-                return job["result"]
-            if job["status"] == "error":
-                raise RuntimeError(job.get("error") or "Job failed with no error message.")
-            if time.time() - start > POLL_TIMEOUT_SECONDS:
-                raise TimeoutError(f"Timed out waiting for job {job_id}.")
-            time.sleep(POLL_INTERVAL_SECONDS)
+if "profile_id" not in st.session_state:
+    st.session_state.profile_id = None
+    st.session_state.profile_summary = None
+if "job_id" not in st.session_state:
+    st.session_state.job_id = None
 
 
-def decision_badge(decision: str) -> None:
-    colors = {
-        "APPROVED": "green",
-        "NEEDS_REVISION": "orange",
-        "REJECTED_MAX_REVISIONS": "red",
-        "REJECTED_FLAGGED_POSTING": "red",
-        "PENDING": "gray",
-    }
-    color = colors.get(decision, "gray")
-    st.markdown(f":{color}[**{decision}**]")
+# ==================== Step 1: Master Profile ====================
 
+st.header("1. Your Master Profile")
 
-# Session state defaults
+profile_source = st.radio(
+    "How do you want to provide your profile?",
+    ["GitHub link / instruction", "Upload CV (PDF)"],
+    horizontal=True,
+)
 
-st.session_state.setdefault("profile_id", None)
-st.session_state.setdefault("profile_summary", None)
-st.session_state.setdefault("tailor_result", None)
-st.session_state.setdefault("tailor_job_id", None)
+with st.form("profile_form"):
+    if profile_source == "GitHub link / instruction":
+        instruction = st.text_input(
+            "GitHub link or instruction",
+            placeholder="github link is https://github.com/yourusername",
+        )
+        profile_file = None
+    else:
+        instruction = None
+        profile_file = st.file_uploader("Upload your CV", type=["pdf"])
 
-st.title("🧭 ProfileFit")
-st.caption("Master Profile → Job-Tailored CV Generator")
+    submitted_profile = st.form_submit_button("Parse Profile")
 
-tab_profile, tab_tailor = st.tabs(["1️⃣ Build Master Profile", "2️⃣ Tailor a CV"])
+if submitted_profile:
+    if not instruction and not profile_file:
+        st.error("Please provide a GitHub link/instruction or upload a CV PDF.")
+    else:
+        with st.spinner("Parsing your profile..."):
+            try:
+                if profile_file is not None:
+                    resp = requests.post(
+                        f"{API_BASE_URL}/profile",
+                        files={"file": (profile_file.name, profile_file.getvalue(), "application/pdf")},
+                        timeout=120,
+                    )
+                else:
+                    resp = requests.post(
+                        f"{API_BASE_URL}/profile",
+                        data={"instruction": instruction},
+                        timeout=120,
+                    )
+                resp.raise_for_status()
+                data = resp.json()
+                st.session_state.profile_id = data["profile_id"]
+                st.session_state.profile_summary = data
+                st.session_state.job_id = None  # reset any previous tailoring run
+            except requests.RequestException as e:
+                st.error(f"Failed to parse profile: {e}")
 
-
-# Tab 1 — Build Master Profile
-
-with tab_profile:
-    st.subheader("Build your master profile")
-    st.write(
-        "Provide a CV file, a GitHub link, and/or a LinkedIn export. "
-        "This is parsed once and reused for every job you tailor against."
+if st.session_state.profile_summary:
+    summary = st.session_state.profile_summary
+    st.success(
+        f"✅ Profile parsed — {summary['items_count']} items found."
+        + (f" Candidate: **{summary['contact_name']}**" if summary.get("contact_name") else "")
     )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        cv_file = st.file_uploader("CV (PDF / DOCX / TXT)", type=["pdf", "docx", "txt"])
-        github_url = st.text_input("GitHub profile URL", placeholder="https://github.com/username")
-    with col2:
-        linkedin_file = st.file_uploader("LinkedIn export / profile PDF", type=["pdf", "csv", "zip"])
-        extra_instruction = st.text_area(
-            "Additional notes (optional)",
-            placeholder="Anything else the parser should know…",
-            height=100,
+
+# ==================== Step 2: Job Posting ====================
+
+if st.session_state.profile_id:
+    st.header("2. Job Posting")
+
+    job_source = st.radio(
+        "How do you want to provide the job posting?",
+        ["Paste text", "Paste URL", "Upload PDF"],
+        horizontal=True,
+    )
+
+    with st.form("job_form"):
+        job_text = job_url = None
+        job_file = None
+        if job_source == "Paste text":
+            job_text = st.text_area("Job posting text", height=200)
+        elif job_source == "Paste URL":
+            job_url = st.text_input("Job posting URL", placeholder="https://...")
+        else:
+            job_file = st.file_uploader("Upload job posting PDF", type=["pdf"], key="job_pdf")
+
+        submitted_job = st.form_submit_button("Tailor My CV")
+
+    def _looks_like_bare_url(text: str) -> bool:
+        """Catch the common mistake of pasting a URL into the text box
+        instead of switching to 'Paste URL' mode — a bare URL has nothing
+        for the extractor to read as job requirements, and would otherwise
+        just burn through retries and fail with a confusing error."""
+        stripped = text.strip()
+        return (
+            stripped.startswith(("http://", "https://"))
+            and " " not in stripped
+            and "\n" not in stripped
         )
 
-    if st.button("Parse Profile", type="primary", disabled=not (cv_file or github_url or linkedin_file or extra_instruction)):
-        try:
-            files = {}
-            if cv_file is not None:
-                files["cv_file"] = (cv_file.name, cv_file.getvalue())
-            if linkedin_file is not None:
-                files["linkedin_file"] = (linkedin_file.name, linkedin_file.getvalue())
-            data = {}
-            if github_url:
-                data["github_url"] = github_url
-            if extra_instruction:
-                data["extra_instruction"] = extra_instruction
-
-            resp = requests.post(f"{API_BASE_URL}/api/profiles", files=files or None, data=data, timeout=30)
-            resp.raise_for_status()
-            job_id = resp.json()["job_id"]
-
-            result = poll_job(job_id, "Parsing your master profile…")
-            st.session_state.profile_id = result["profile_id"]
-            st.session_state.profile_summary = result
-            st.success(f"Profile parsed: {result['item_count']} items found.")
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Failed to parse profile: {e}")
-
-    if st.session_state.profile_summary:
-        summary = st.session_state.profile_summary
-        st.divider()
-        st.markdown(f"**Active profile:** `{st.session_state.profile_id}`")
-        c1, c2 = st.columns(2)
-        c1.metric("Items parsed", summary["item_count"])
-        c2.metric("Contact info found", "Yes" if summary["contact_found"] else "No")
-
-        with st.expander("View parsed items"):
-            by_type: dict[str, list] = {}
-            for item in summary["items"]:
-                by_type.setdefault(item["type"], []).append(item)
-            for item_type, items in by_type.items():
-                st.markdown(f"**{item_type}**")
-                for item in items:
-                    st.write(f"- {item['title']}" + (f" ({item['dates']})" if item.get("dates") else ""))
-
-
-# Tab 2 — Tailor a CV
-
-with tab_tailor:
-    st.subheader("Tailor your CV to a job posting")
-
-    if not st.session_state.profile_id:
-        st.warning("Parse a master profile in the first tab before tailoring a CV.")
-
-    source_mode = st.radio("Job posting source", ["Paste text", "URL", "Upload PDF"], horizontal=True)
-    posting_text = posting_url = None
-    posting_file = None
-
-    if source_mode == "Paste text":
-        posting_text = st.text_area("Job posting text", height=200)
-    elif source_mode == "URL":
-        posting_url = st.text_input("Job posting URL", placeholder="https://…")
-    else:
-        posting_file = st.file_uploader("Job posting PDF", type=["pdf"])
-
-    can_submit = st.session_state.profile_id and (posting_text or posting_url or posting_file)
-    if st.button("Generate Tailored CV", type="primary", disabled=not can_submit):
-        try:
+    if submitted_job:
+        if job_text and _looks_like_bare_url(job_text):
+            st.error(
+                "That looks like a URL, not job posting text. Select **'Paste URL'** "
+                "above instead — pasting a link into the text box won't work, since "
+                "nothing will be fetched from it."
+            )
+        elif not job_text and not job_url and not job_file:
+            st.error("Please provide job posting text, a URL, or a PDF.")
+        else:
             data = {"profile_id": st.session_state.profile_id}
             files = None
-            if posting_text:
-                data["posting_text"] = posting_text
-            elif posting_url:
-                data["posting_url"] = posting_url
-            elif posting_file is not None:
-                files = {"posting_file": (posting_file.name, posting_file.getvalue())}
+            if job_file is not None:
+                files = {"file": (job_file.name, job_file.getvalue(), "application/pdf")}
+            elif job_url:
+                data["url"] = job_url
+            elif job_text:
+                data["text"] = job_text
 
-            resp = requests.post(f"{API_BASE_URL}/api/tailor", data=data, files=files, timeout=30)
-            resp.raise_for_status()
-            job_id = resp.json()["job_id"]
-            st.session_state.tailor_job_id = job_id
+            try:
+                resp = requests.post(f"{API_BASE_URL}/tailor", data=data, files=files, timeout=30)
+                resp.raise_for_status()
+                st.session_state.job_id = resp.json()["job_id"]
+            except requests.RequestException as e:
+                st.error(f"Failed to start tailoring job: {e}")
 
-            result = poll_job(
-                job_id,
-                "Tailoring your CV — extracting requirements, selecting evidence, "
-                "and running coverage/fabrication critics (this can take a minute)…",
-            )
-            st.session_state.tailor_result = result
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Failed to tailor CV: {e}")
 
-    result = st.session_state.tailor_result
-    if result:
-        st.divider()
-        c1, c2, c3 = st.columns([2, 1, 1])
-        with c1:
-            st.write("**Decision**")
-            decision_badge(result["decision"])
-        c2.metric("Revisions", f"{result['revision_count']}/{result['max_revisions']}")
-        c3.metric("Critic cycles", result["critic_cycle_count"])
+# ==================== Step 3: Poll + Render Result ====================
 
+if st.session_state.job_id:
+    st.header("3. Result")
+
+    status_placeholder = st.empty()
+    result = None
+    elapsed = 0
+
+    with st.spinner("Tailoring your CV — this can take a minute (parsing, extraction, "
+                     "tailoring, and two quality-check agents running)..."):
+        while elapsed < POLL_TIMEOUT_SECONDS:
+            try:
+                resp = requests.get(f"{API_BASE_URL}/tailor/{st.session_state.job_id}", timeout=15)
+                resp.raise_for_status()
+                result = resp.json()
+            except requests.RequestException as e:
+                status_placeholder.error(f"Error polling job status: {e}")
+                break
+
+            if result["status"] == "done":
+                break
+            if result["status"] == "error":
+                status_placeholder.error(f"Tailoring failed: {result.get('error')}")
+                break
+
+            status_placeholder.info(f"Still working... ({elapsed}s elapsed)")
+            time.sleep(POLL_INTERVAL_SECONDS)
+            elapsed += POLL_INTERVAL_SECONDS
+
+    if result and result["status"] == "done":
+        status_placeholder.empty()
+    elif result and result["status"] == "error":
+        status_placeholder.error(f"Tailoring failed: {result.get('error')}")
+    elif result is None or result.get("status") == "running":
+        status_placeholder.warning(
+            f"Timed out after {POLL_TIMEOUT_SECONDS}s without finishing. The job "
+            f"may still be running in the background — try refreshing in a bit, "
+            f"or check the FastAPI server logs for what's taking long."
+        )
+
+    if result and result["status"] == "done":
+        # --- Poisoned/spam posting alert (button-triggered reveal) ---
         if result.get("security_flagged"):
-            st.error(f"⚠️ Posting flagged during extraction: {result.get('flag_reason')}")
+            st.error("🚨 **This job posting looks suspicious.**")
+            with st.expander("Show flagged reason"):
+                st.write(
+                    result.get("flag_reason")
+                    or "The posting contained content that did not match a normal job description."
+                )
+            st.warning("No CV was generated for this posting.")
+        else:
+            # --- Job info echo ---
+            st.subheader(f"Tailored for: {result.get('job_title') or 'this role'}")
+            if result.get("company"):
+                st.caption(f"Company: {result['company']}")
 
-        if result.get("docx_available") or result.get("pdf_available"):
-            dl1, dl2 = st.columns(2)
-            job_id = st.session_state.tailor_job_id
-            if result.get("docx_available"):
-                docx_bytes = requests.get(f"{API_BASE_URL}/api/download/{job_id}/docx", timeout=30).content
-                dl1.download_button("⬇️ Download .docx", docx_bytes, file_name="tailored_cv.docx")
-            if result.get("pdf_available"):
-                pdf_bytes = requests.get(f"{API_BASE_URL}/api/download/{job_id}/pdf", timeout=30).content
-                dl2.download_button("⬇️ Download .pdf", pdf_bytes, file_name="tailored_cv.pdf")
+            # --- Match score ---
+            match_score = result.get("match_score")
+            if match_score is not None:
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    st.metric("Match Score", f"{match_score}%")
+                with col2:
+                    st.progress(match_score / 100)
 
-        cv = result.get("tailored_cv")
-        if cv:
-            st.markdown("### Professional Summary")
-            st.write(cv["professional_summary"])
+            # --- Decision + revision transparency ---
+            decision = result.get("decision")
+            if decision == "APPROVED":
+                st.success("✅ CV approved and ready to download.")
+            elif decision == "REJECTED_MAX_REVISIONS":
+                st.warning(
+                    "This CV went through several revision attempts and is the best "
+                    "version produced — consider adding more detail to your profile."
+                )
+            with st.expander(
+                f"Why this result? (revision {result.get('revision_count', 0)}/"
+                f"{result.get('max_revisions')}, {result.get('critic_cycle_count', 0)} "
+                f"quality-check cycles)"
+            ):
+                st.write(result.get("decision_summary") or "No summary available.")
 
-            st.markdown("### Sections")
-            by_section: dict[str, list] = {}
-            for item in cv["sections"]:
-                by_section.setdefault(item["section"], []).append(item)
-            for section, items in by_section.items():
-                st.markdown(f"**{section}**")
-                for item in sorted(items, key=lambda x: x["relevance_score"], reverse=True):
-                    title = item["title"] + (f"  |  {item['dates']}" if item.get("dates") else "")
-                    st.write(f"**{title}**  (relevance {item['relevance_score']}/100)")
-                    for bullet in item["tailored_bullets"]:
-                        st.write(f"- {bullet['text']}")
+            # --- Missing skills ---
+            if result.get("missing_skills"):
+                st.subheader("Skills not found in your profile")
+                for skill in result["missing_skills"]:
+                    st.write(f"- {skill}")
 
-            if cv.get("missing_skills"):
-                st.markdown("### Missing Skills")
-                st.write(", ".join(cv["missing_skills"]))
+            # --- Professional summary ---
+            if result.get("professional_summary"):
+                st.subheader("Professional Summary")
+                st.write(result["professional_summary"])
 
-        cov = result.get("coverage_result")
-        fab = result.get("fabrication_result")
-        if cov or fab:
-            with st.expander("Critic feedback"):
-                if cov:
-                    st.markdown(f"**Coverage Critic — {cov['status']}**")
-                    st.write(cov["evidence"])
-                    if cov.get("suggested_missing_items"):
-                        st.write("Missing items:", ", ".join(cov["suggested_missing_items"]))
-                if fab:
-                    st.markdown(f"**Fabrication Critic — {fab['status']}**")
-                    st.write(fab["evidence"])
+            # --- Section breakdown ---
+            if result.get("sections"):
+                st.subheader("CV Sections")
+                by_section: dict[str, list[dict]] = {}
+                for item in result["sections"]:
+                    by_section.setdefault(item["section"], []).append(item)
+                for section_name, items in by_section.items():
+                    with st.expander(f"{section_name.title()} ({len(items)})", expanded=True):
+                        for item in sorted(items, key=lambda x: x["relevance_score"], reverse=True):
+                            title = item["title"]
+                            if item.get("dates"):
+                                title += f"  |  {item['dates']}"
+                            st.markdown(f"**{title}** — relevance {item['relevance_score']}/100")
+                            for bullet in item["bullets"]:
+                                st.write(f"  - {bullet}")
+
+            if result.get("omitted_experience_ids"):
+                with st.expander(f"Omitted items ({len(result['omitted_experience_ids'])})"):
+                    st.write(
+                        "These profile items weren't included in this version of the CV "
+                        "(usually because they were less relevant to this specific role)."
+                    )
+
+            # --- Downloads, named candidate_name_CV ---
+            st.subheader("Download")
+            candidate_name = result.get("candidate_name") or "candidate"
+            col1, col2 = st.columns(2)
+            if result.get("docx_filename"):
+                docx_resp = requests.get(
+                    f"{API_BASE_URL}/tailor/{st.session_state.job_id}/file/docx", timeout=30
+                )
+                with col1:
+                    st.download_button(
+                        "⬇️ Download .docx",
+                        docx_resp.content,
+                        file_name=f"{candidate_name}_CV.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+            if result.get("pdf_filename"):
+                pdf_resp = requests.get(
+                    f"{API_BASE_URL}/tailor/{st.session_state.job_id}/file/pdf", timeout=30
+                )
+                with col2:
+                    st.download_button(
+                        "⬇️ Download .pdf",
+                        pdf_resp.content,
+                        file_name=f"{candidate_name}_CV.pdf",
+                        mime="application/pdf",
+                    )
+            elif result.get("docx_filename"):
+                st.caption("PDF not available (LibreOffice not installed on the server) — .docx only.")

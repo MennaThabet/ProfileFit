@@ -161,6 +161,31 @@ def _add_empty_sections_notice(document: Document) -> None:
     run.font.color.rgb = WARNING_COLOR
 
 
+import re
+
+
+def _slugify_name(name: str) -> str:
+    """Turn a candidate's name into a filesystem-safe filename component."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+    return slug or "candidate"
+
+
+def default_output_path(
+    contact_items: Optional[list[ProfileItem]] = None,
+    output_dir: str | Path = "output",
+) -> Path:
+    """
+    Build the "candidate_name_CV.docx" output path from a CONTACT item's
+    title (see profile_parser.get_contact_items). Falls back to a generic
+    name when no contact info is available (e.g. RAG-only runs with no fresh
+    profile parse) rather than failing — callers can still override with an
+    explicit output_path if they need something different.
+    """
+    name = contact_items[0].title if contact_items else None
+    slug = _slugify_name(name) if name else "candidate"
+    return Path(output_dir) / f"{slug}_CV.docx"
+
+
 def render_cv_docx(
     tailored_cv: TailoredCV,
     contact_items: Optional[list[ProfileItem]] = None,

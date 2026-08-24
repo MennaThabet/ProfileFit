@@ -95,7 +95,7 @@ class GraphState(BaseModel):
         default=None,
         description="Prioritized, actionable feedback for the next Selector/Tailor "
         "attempt. Populated by the Decision Agent's DecisionAgentOutput."
-        "prioritized_feedback (see decision_agent.run_decision_agent) — a "
+        "prioritized_feedback (see decision.run_decision_agent) — a "
         "clarified, severity-ordered synthesis of the coverage + fabrication "
         "critics' raw findings, not a raw concatenation of their fields. "
         "None when the last decision was APPROVED (nothing to revise).",
@@ -103,7 +103,7 @@ class GraphState(BaseModel):
     decision_summary: Optional[str] = Field(
         default=None,
         description="Plain-English summary of the current decision outcome, "
-        "from the Decision Agent (decision_agent.DecisionAgentOutput."
+        "from the Decision Agent (decision.DecisionAgentOutput."
         "summary_for_human). This is EXPLANATORY ONLY — intended for whatever "
         "human-in-the-loop review UI eventually reads this state (and for "
         "logging/debugging). It has no effect on routing: the actual "

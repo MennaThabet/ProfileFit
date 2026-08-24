@@ -7,7 +7,7 @@ from langgraph.graph import END, START, StateGraph
 
 from coverage_critic import run_coverage_critic
 from decision import build_fallback_output, run_decision_agent
-from exporter import export_cv
+from exporter import default_output_path, export_cv
 from fabrication_critic import run_fabrication_critic
 from graph_state import DecisionStatus, GraphState, MAX_REVISIONS
 from profile_parser import get_contact_items, parse_profile_data
@@ -210,7 +210,7 @@ def export_node(state: GraphState) -> dict:
     result = export_cv(
         state.tailored_cv,
         contact_items=state.contact_items,
-        output_path=Path("output/tailored_cv.docx"),
+        output_path=default_output_path(state.contact_items),
     )
     _log(f"Export complete: DOCX={result['docx_path']}, PDF={result['pdf_path']}")
     return {
@@ -250,7 +250,7 @@ if __name__ == "__main__":
     from graph_state import build_initial_state
 
     initial_state = build_initial_state(
-        posting_source="https://www.linkedin.com/jobs/view/4373797902/",
+        posting_source="https://www.linkedin.com/jobs/view/4446392638/",
         fetch_first=True,
         profile_instruction=(
             "github link is https://github.com/georgebassem111, and read the CV "
