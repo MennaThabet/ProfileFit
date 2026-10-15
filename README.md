@@ -19,26 +19,29 @@
 
 ## 📌 Table of Contents
 
-- [The Problem](#-the-problem)
-- [What ProfileFit Does](#-what-profilefit-does)
-- [System Architecture](#-system-architecture)
-- [Key Features](#-key-features)
-- [How a Run Works](#-how-a-run-works)
-- [Tech Stack](#-tech-stack)
-- [Getting Started](#-getting-started)
-- [API Reference](#-api-reference)
-- [Project Structure](#-project-structure)
-- [Sample Results](#-sample-results)
-- [Limitations & Roadmap](#-limitations--roadmap)
-- [Team](#-team)
+- [The Problem](#the-problem)
+- [What ProfileFit Does](#what-profilefit-does)
+- [System Architecture](#system-architecture)
+- [Key Features](#key-features)
+- [How a Run Works](#how-a-run-works)
+- [Tech Stack](#tech-stack)
+- [Getting Started](#getting-started)
+- [API Reference](#api-reference)
+- [Project Structure](#project-structure)
+- [Limitations & Roadmap](#limitations-roadmap)
+- [Team](#team)
 
 ---
+
+<a id="the-problem"></a>
 
 ## 🎯 The Problem
 
 Graduates accumulate far more relevant experience than fits on one CV, and tailoring it for every posting by hand doesn't scale. Most people send one generic CV everywhere and lose out on both ATS keyword matching and human skim-reading.
 
 The obvious fix, asking an LLM to *"make my CV match this job"*, introduces a worse problem: the model will happily **invent skills, inflate metrics, and claim tools you never used**. That can get someone hired for something they can't do, or disqualified for dishonesty.
+
+<a id="what-profilefit-does"></a>
 
 ## ✨ What ProfileFit Does
 
@@ -49,6 +52,8 @@ Master profile (once)  +  Job posting (per run)   ──►   Tailored, verified
 ```
 
 ---
+
+<a id="system-architecture"></a>
 
 ## 🏗️ System Architecture
 
@@ -81,6 +86,8 @@ flowchart LR
 **Orchestration** is a LangGraph state machine with a shared, Pydantic-validated `GraphState`. The two intake steps run in parallel, and so do the two critics, with the revision loop bounded in code.
 
 ---
+
+<a id="key-features"></a>
 
 ## 🚀 Key Features
 
@@ -120,6 +127,8 @@ flowchart LR
 
 ---
 
+<a id="how-a-run-works"></a>
+
 ## 🔄 How a Run Works
 
 1. **Parse profile** turns a resume or GitHub page into structured `ProfileItem`s (experience, projects, education, skills, certifications, achievements, contact).
@@ -131,6 +140,8 @@ flowchart LR
 7. **Export** writes the `.docx` / `.pdf`, and the UI shows the score, missing skills, section breakdown and downloads.
 
 ---
+
+<a id="tech-stack"></a>
 
 ## 🧰 Tech Stack
 
@@ -146,6 +157,8 @@ flowchart LR
 | Packaging | **uv** (`pyproject.toml` + `uv.lock`) |
 
 ---
+
+<a id="getting-started"></a>
 
 ## ⚡ Getting Started
 
@@ -190,6 +203,8 @@ python agent/smoke_test.py     # step-by-step pipeline check
 
 ---
 
+<a id="api-reference"></a>
+
 ## 🔌 API Reference
 
 | Method | Endpoint | Description |
@@ -201,6 +216,8 @@ python agent/smoke_test.py     # step-by-step pipeline check
 | `GET` | `/health` | Health check. |
 
 ---
+
+<a id="project-structure"></a>
 
 ## 🗂️ Project Structure
 
@@ -230,6 +247,10 @@ ProfileFit/
 
 ---
 
+---
+
+<a id="limitations-roadmap"></a>
+
 ## ⚠️ Limitations & Roadmap
 
 **Known limitations**
@@ -246,6 +267,8 @@ ProfileFit/
 - [ ] Automated intake workflow (new posting → tailor → email draft)
 
 ---
+
+<a id="team"></a>
 
 ## 👥 Team
 
